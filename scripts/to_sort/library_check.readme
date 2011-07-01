@@ -1,0 +1,9 @@
+reinvented the wheel just a little more round, and a little less wheel. 
+
+library check and copy script that practically does what libcopy does, only a little more elegantly and has a fair 
+amount of error checking and correcting code to deal with most cases. 
+
+wrote this a while back, it might be useful to some using lots of non standard shared libs in chroot environment.
+
+
+xmasacid (acid-rein/ar)

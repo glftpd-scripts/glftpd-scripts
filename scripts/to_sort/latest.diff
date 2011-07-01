@@ -1,0 +1,936 @@
+Index: zipscript/include/constants.dzsbot.h
+===================================================================
+--- zipscript/include/constants.dzsbot.h	(revision 2569)
++++ zipscript/include/constants.dzsbot.h	(working copy)
+@@ -14,6 +14,10 @@
+ #define TRUE				1
+ #define FALSE				0
+ 
++#define BAR_FILE			0
++#define BAR_DIR				1
++#define BAR_OFF				2
++
+ #define DISABLED			NULL
+ 
+ #define FILE_MAX			256
+Index: zipscript/include/macros.h
+===================================================================
+--- zipscript/include/macros.h	(revision 2569)
++++ zipscript/include/macros.h	(working copy)
+@@ -25,8 +25,8 @@
+ #endif
+ 
+ /* General */
+-#if ( incompleteislink == 1 )
+-#if ( userellink == 1 )
++#if ( incompleteislink == TRUE )
++#if ( userellink == TRUE )
+ #define create_incomplete() symlink(g.v.misc.release_name, g.l.incomplete)
+ #define create_incomplete_nfo() symlink(g.v.misc.release_name, g.l.nfo_incomplete)
+ #define create_incomplete_sample() symlink(g.v.misc.release_name, g.l.sample_incomplete)
+@@ -45,7 +45,7 @@
+ #endif
+ 
+ /* No race */
+-#if ( announce_norace == 1 )
++#if ( announce_norace == TRUE )
+ #define CHOOSE(a,b,c)	g.v.total.users > 1 ? b : c;
+ #else
+ #define CHOOSE(a,b,c)	b;
+Index: zipscript/include/cleanup.h
+===================================================================
+--- zipscript/include/cleanup.h	(revision 2569)
++++ zipscript/include/cleanup.h	(working copy)
+@@ -3,10 +3,10 @@
+ 
+ void scandirectory(char *, int);
+ char *replace_cookies(char *);
+-void incomplete_cleanup(char *, int, char *);
++void incomplete_cleanup(char *, int);
+ void cleanup(char *, char *, int, char *);
+-int checklink(char *, char *, int);
++int checklink(char *, int);
+ int regcomp_error(int, regex_t *, char *);
++short matchpath(char *, char *);
+ 
+ #endif
+-
+Index: zipscript/include/zsconfig.defaults.h
+===================================================================
+--- zipscript/include/zsconfig.defaults.h	(revision 2569)
++++ zipscript/include/zsconfig.defaults.h	(working copy)
+@@ -872,7 +872,7 @@
+ 
+ #ifndef incompleteislink
+ #define incompleteislink_is_defaulted
+-#define incompleteislink                          1
++#define incompleteislink                          true
+ #endif
+ 
+ #ifndef lock_optimize
+@@ -1212,7 +1212,7 @@
+ 
+ #ifndef status_bar_type
+ #define status_bar_type_is_defaulted
+-#define status_bar_type                           1
++#define status_bar_type                           BAR_DIR
+ #endif
+ 
+ #ifndef storage
+@@ -1262,7 +1262,7 @@
+ 
+ #ifndef userellink
+ #define userellink_is_defaulted
+-#define userellink                                1
++#define userellink                                true
+ #endif
+ 
+ #ifndef video_completebar
+Index: zipscript/conf/zsconfig.h.dist-nonglftpd
+===================================================================
+--- zipscript/conf/zsconfig.h.dist-nonglftpd	(revision 2569)
++++ zipscript/conf/zsconfig.h.dist-nonglftpd	(working copy)
+@@ -29,8 +29,8 @@
+ #define debug_mode                   FALSE
+ #define debug_altlog                 TRUE
+ 
+-#define status_bar_type              1
+-#define incompleteislink             1
++#define status_bar_type              BAR_DIR
++#define incompleteislink             true
+ 
+ #define ignored_types                ",diz,debug,message,imdb,html,url,m3u,metadata"
+ 
+Index: zipscript/conf/zsconfig.h.dist
+===================================================================
+--- zipscript/conf/zsconfig.h.dist	(revision 2569)
++++ zipscript/conf/zsconfig.h.dist	(working copy)
+@@ -29,8 +29,8 @@
+ #define debug_mode                   FALSE
+ #define debug_altlog                 TRUE
+ 
+-#define status_bar_type              1
+-#define incompleteislink             1
++#define status_bar_type              BAR_DIR
++#define incompleteislink             true
+ 
+ #define ignored_types                ",diz,debug,message,imdb,html,url,m3u,metadata"
+ 
+Index: zipscript/src/rescan.c
+===================================================================
+--- zipscript/src/rescan.c	(revision 2569)
++++ zipscript/src/rescan.c	(working copy)
+@@ -718,11 +718,29 @@
+ 			}
+ 				move_progress_bar(0, &g.v, g.ui, g.gi);
+ 		}
+-	} else if (mark_empty_dirs_as_incomplete_on_rescan) {
++	} else {
++		int empty = 1;
++		if (create_missing_sfv_link && (!matchpath(group_dirs, g.l.path) || create_incomplete_links_in_group_dirs) && g.l.sfv_incomplete && !matchpath(nocheck_dirs, g.l.path) && !matchpath(allowed_types_exemption_dirs, g.l.path)) {
++			rewinddir(dir);
++			while ((dp = readdir(dir))) {
++				ext = find_last_of(dp->d_name, ".");
++				if (*ext == '.')
++					ext++;
++				if (*ext != 0 && get_filetype(&g, ext) == 3) {
++					d_log("rescan: Creating missing-sfv indicator %s.\n", g.l.sfv_incomplete);
++					if (create_incomplete_sfv())
++						d_log("rescan: create_incomplete_sfv() returned something.\n");
++					empty = 0;
++					break;
++				}
++			}
++		}
++		if (empty && mark_empty_dirs_as_incomplete_on_rescan) {
+ 			if (create_incomplete()) {
+ 				d_log("rescan: create_incomplete() returned something\n");
+ 			}
+ 			printf(" Empty dir - marking as incomplete.\n");
++		}
+ 	}
+ 	printf(" Passed : %i\n", (int)g.v.total.files - (int)g.v.total.files_missing);
+ 	printf(" Failed : %i\n", (int)g.v.total.files_bad);
+Index: zipscript/src/ng-chown.c
+===================================================================
+--- zipscript/src/ng-chown.c	(revision 2569)
++++ zipscript/src/ng-chown.c	(working copy)
+@@ -150,8 +150,11 @@
+ 		switch (*instr) {
+ 		case 0:
+ 		case ' ':
+-			if (strncmp(instr - pos, path, pos - 1) == 0) {
+-				return 1;
++			if (!strncmp(instr - pos, path, pos)) {
++				if (*(instr - 1) == '/')
++					return 1;
++				if (*(path + pos) == '/')
++			        	return 1;
+ 			}
+ 			pos = 0;
+ 			break;
+Index: zipscript/src/zsfunctions.c
+===================================================================
+--- zipscript/src/zsfunctions.c	(revision 2569)
++++ zipscript/src/zsfunctions.c	(working copy)
+@@ -130,48 +130,45 @@
+ 
+         errno = 0;
+         
+-  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+-    d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
+-  }
+-
++	if (getcwd(cwd, sizeof(cwd)) == NULL)
++		d_log("zsfunctions.c: findfileextsub() - Error getting path: %s\n", strerror(errno));
+ 	rewinddir(dir);
+-
+-  if((dir2=opendir(cwd)) == NULL) {
+-    d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
+-  }
++	if((dir2=opendir(cwd)) == NULL)
++		d_log("zsfunctions.c: findfileextsub() - Error getting path: %s\n", strerror(errno));
+   
+ 	while ((dp = readdir(dir2))) {
+-	  if (strcmp(dp->d_name,".") && strcmp(dp->d_name,".."))  {
+-	    struct stat attribut;
+-      strcpy(cwd2,cwd);
+-      strcat(cwd2,"/");
+-      strcat(cwd2,dp->d_name);	  
+-	    if (stat(cwd2, &attribut) == -1) 
+-	      d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
+-
+-	    if (S_ISDIR(attribut.st_mode)) {
+-	      if ((dir3 = opendir(cwd2)) == NULL)
+-	        d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
++		if (strcmp(dp->d_name,".") && strcmp(dp->d_name,".."))  {
++			struct stat attribut;
++			strcpy(cwd2,cwd);
++			strcat(cwd2,"/");
++			strcat(cwd2,dp->d_name);	  
++			if (stat(cwd2, &attribut) == -1) 
++				d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
++			if (strcomp(sample_list, dp->d_name)) {
++				if (S_ISDIR(attribut.st_mode)) {
++					if ((dir3 = opendir(cwd2)) == NULL)
++						d_log("zsfunctions.c: findfileextsub() - Error getting path\n");
+ 	        
+-	      rewinddir(dir3);
+-	      while ((dp2 = readdir(dir3))) {
+-	        if ((k = NAMLEN(dp2)) < 4)
+-	          continue;
+-		if (strcomp(video_types, dp2->d_name + k - 3))
+-	          return dp2->d_name;
+-	      }
+-	    closedir(dir3);
+-	    }
+-	  }
+-	  if ((k = NAMLEN(dp)) < 4)
+-	    continue;
+-	  if (strcomp(video_types, dp->d_name + k - 3))
+-	    return dp->d_name;
++					rewinddir(dir3);
++					while ((dp2 = readdir(dir3))) {
++						if ((k = NAMLEN(dp2)) < 4)
++							continue;
++						if (strcomp(video_types, dp2->d_name + k - 3))
++							return dp2->d_name;
++					}
++					closedir(dir3);
++				}
++			}
++		}
++		if ((k = NAMLEN(dp)) < 4)
++			continue;
++		if (strcomp(video_types, dp->d_name + k - 3))
++			return dp->d_name;
+ 	}
+ 	closedir(dir2);
+ 	
+ 	if (errno)
+-            d_log("zsfunctions.c: findfileextsub() - closedir(dir) returned an error: %s\n", strerror(errno));
++		d_log("zsfunctions.c: findfileextsub() - closedir(dir) returned an error: %s\n", strerror(errno));
+ 
+ 	return NULL;
+ }
+@@ -185,47 +182,45 @@
+ 	char * pch;
+ 	static struct dirent	*dp, *dp2;
+ 
+-        errno = 0;
+-  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+-    d_log("Error getting path\n");
+-  }
+-  pch=strrchr(cwd,47);
+-  strncpy(cwd2,cwd,pch-cwd);
+-  cwd2[pch-cwd]='\0';
+-  
++	errno = 0;
++	if (getcwd(cwd, sizeof(cwd)) == NULL)
++		d_log("findfileextsubp: Error getting path: %s\n", strerror(errno));
++	pch=strrchr(cwd,47);
++	strncpy(cwd2,cwd,pch-cwd);
++	cwd2[pch-cwd]='\0';
++
+ 	rewinddir(dir);
+ 
+-  if((dir2=opendir(cwd2)) == NULL) {
+-    d_log("zsfunctions.c: findfileextsubp() - Error getting path\n");
+-  }
++	if((dir2=opendir(cwd2)) == NULL)
++		d_log("zsfunctions.c: findfileextsubp() - Error getting path: %s\n", strerror(errno));
+   
+ 	while ((dp = readdir(dir2))) {
+-	  if (strcmp(dp->d_name,".") && strcmp(dp->d_name,".."))  {
+-	    struct stat attribut;
+-      strcpy(cwd3,cwd2);
+-      strcat(cwd3,"/");
+-      strcat(cwd3,dp->d_name);	  
+-	    if (stat(cwd3, &attribut) == -1) 
+-	      d_log("zsfunctions.c: findfileextsubp() - Error getting path\n");
+-
+-	    if (S_ISDIR(attribut.st_mode)) {
+-	      if ((dir3 = opendir(cwd3)) == NULL)
+-	        d_log("zsfunctions.c: findfileextsubp() - Error getting path\n");
+-	        
+-	      rewinddir(dir3);
+-	      while ((dp2 = readdir(dir3))) {
+-	        if ((k = NAMLEN(dp2)) < 4)
+-	          continue;
+-		if (strcomp(video_types, dp2->d_name + k - 3))
+-	          return dp2->d_name;
+-	      }
+-	    closedir(dir3);
+-	    }
+-	  }
+-	  if ((k = NAMLEN(dp)) < 4)
+-	    continue;
+-	  if (strcomp(video_types, dp->d_name + k - 3))
+-	    return dp->d_name;
++		if (strcmp(dp->d_name,".") && strcmp(dp->d_name,".."))  {
++			struct stat attribut;
++			strcpy(cwd3,cwd2);
++			strcat(cwd3,"/");
++			strcat(cwd3,dp->d_name);	  
++			if (stat(cwd3, &attribut) == -1) 
++				d_log("zsfunctions.c: findfileextsubp() - Error getting path\n");
++			if (strcomp(sample_list, dp->d_name)) {
++				if (S_ISDIR(attribut.st_mode)) {
++					if ((dir3 = opendir(cwd3)) == NULL)
++						d_log("zsfunctions.c: findfileextsubp() - Error getting path\n");
++					rewinddir(dir3);
++					while ((dp2 = readdir(dir3))) {
++						if ((k = NAMLEN(dp2)) < 4)
++							continue;
++						if (strcomp(video_types, dp2->d_name + k - 3))
++							return dp2->d_name;
++					}
++					closedir(dir3);
++				}
++			}
++		}
++		if ((k = NAMLEN(dp)) < 4)
++			continue;
++		if (strcomp(video_types, dp->d_name + k - 3))
++			return dp->d_name;
+ 	}
+ 	closedir(dir2);
+ 	
+@@ -734,15 +729,21 @@
+ 	int		pos = 0;
+ 
+ 	if ( (int)strlen(instr) < 2 || (int)strlen(path) < 2 ) {
+-		d_log("matchpath: pathlength(s) too short - returning nomatch\n");
++		d_log("matchpath: pathlength(s) too short - returning nomatch (not an error)\n");
+ 		return 0;
+ 	}
+ 	do {
+ 		switch (*instr) {
+ 		case 0:
+ 		case ' ':
+-			if (!strncmp(instr - pos, path, pos - 1)) {
+-				return 1;
++			if (!strncmp(instr - pos, path, pos)) {
++				if (*(instr - 1) == '/')
++					return 1;
++				if ((int)strlen(path) >= pos) {
++					if (*(path + pos) == '/')
++						return 1;
++				} else
++					return 1;
+ 			}
+ 			pos = 0;
+ 			break;
+@@ -776,6 +777,12 @@
+ 			}
+ 			pos = 0;
+ 			break;
++	  case ' ':
++	    if (k == pos && !strncasecmp(instr - pos, searchstr, pos)) {
++	      return 1;
++	    }
++	    pos = 0;
++	    break;
+ 		default:
+ 			pos++;
+ 			break;
+@@ -991,7 +998,7 @@
+ 					}
+ 					index_start++;
+ 					raceI->total.files++;
+-					if (!strcomp(ignored_types, fname + ext_start)) {
++					if (!strcomp(ignored_types, fname + ext_start) || !strcomp("nfo", fname + ext_start)) {
+ //					if (!strcomp(ignored_types, fname + ext_start) && !(strcomp(allowed_types, fname + ext_start) && matchpath(allowed_types_exemption_dirs, raceI->misc.current_path))) {
+ 						if (findfile(dir, fname)) {
+ 							raceI->total.files_missing--;
+@@ -1735,7 +1742,7 @@
+ void
+ createstatusbar(const char *bar)
+ {
+-#if ( status_bar_type == 2 )
++#if ( status_bar_type == BAR_OFF )
+     (void)bar;
+ #else
+     char *newbar, *tmp;
+@@ -1746,10 +1753,10 @@
+     while (tmp != NULL)
+     {
+ /* Creates status bar file */
+-#if ( status_bar_type == 0 )
++#if ( status_bar_type == BAR_FILE )
+         createzerofile(tmp);
+ #endif
+-#if ( status_bar_type == 1 )
++#if ( status_bar_type == BAR_DIR )
+         mkdir(tmp, 0777);
+ #endif
+ 
+Index: zipscript/src/cleanup.c
+===================================================================
+--- zipscript/src/cleanup.c	(revision 2569)
++++ zipscript/src/cleanup.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include <time.h>
+ #include <unistd.h>
+ #include <errno.h>
++#include <libgen.h>
+ 
+ #include "objects.h"
+ #include "macros.h"
+@@ -29,7 +30,6 @@
+ #endif
+ 
+ #include "cleanup.h"
+-
+ struct tm      *timenow;
+ time_t		tnow;
+ 
+@@ -38,25 +38,29 @@
+ {
+ 
+ 	int		setfree = 1;
+-	char		startdir[PATH_MAX] = "/";
++	char		startdir[PATH_MAX];
+ 
+-	if (argc > 1) {
+-		if (!strncmp(argv[1], "/", 1)) {
+-			setfree = 0;
+-			printf("PZS-NG Cleanup: Running script in view mode only.\n");
+-			snprintf(startdir, PATH_MAX, "%s", argv[1]);
+-		} else {
+-			if (getcwd(startdir, PATH_MAX) == NULL) {
+-				printf("PZS-NG Cleanup: ERROR - Failed to getcwd.\n");
+-				exit (0);
+-			}
+-			printf("PZS-NG Cleanup: Running.\n");
++	if (argc == 2 && !strncmp(argv[1], "/", 1)) {
++		setfree = 0;
++		snprintf(startdir, PATH_MAX, "%s", argv[1]);
++		printf("PZS-NG Cleanup: Running script in view mode only.\n");
++		if (chroot(startdir) == -1) {
++			printf("PZS-NG Cleanup: ERROR - Failed to chroot: %s.\n", strerror(errno));
++			exit(0);
+ 		}
++		startdir[0] = '\0';
++	} else {
++		if (getcwd(startdir, PATH_MAX) == NULL) {
++			printf("PZS-NG Cleanup: ERROR - Failed to getcwd: %s.\n", strerror(errno));
++			exit(0);
++		} else if (!strcmp(startdir, "/"))
++			startdir[0] = '\0';
++		printf("PZS-NG Cleanup: Running.\n");
+ 	}
+ 
+ 	cleanup(cleanupdirs, cleanupdirs_dated, setfree, startdir);
+ 
+-	if (argc < 2 || always_scan_audio_syms == TRUE) {
++	if (((int)strlen(startdir) < 1 && argc < 2) || always_scan_audio_syms == TRUE) {
+ 
+ #if ( audio_genre_sort == TRUE )
+ 		scandirectory((char *)audio_genre_path, setfree);
+@@ -74,10 +78,6 @@
+ 		scandirectory((char *)audio_group_path, setfree);
+ #endif
+ 
+-#if ( audio_artist_sort == TRUE )
+-		scandirectory((char *)audio_artist_path, setfree);
+-#endif
+-
+ #if ( audio_language_sort == TRUE )
+ 		scandirectory((char *)audio_language_path, setfree);
+ #endif
+@@ -89,15 +89,15 @@
+ 
+ /* new try without expensive scandir() */
+ void
+-scandirectory(char *dirname, int setfree)
++scandirectory(char *dname, int setfree)
+ {
+ 	int		fd;
+ 	DIR		*dir1, *dir2;
+ 	struct dirent	*dp1, *dp2;
+ 	
+-	printf("[%s]\n", dirname);
++	printf("[%s]\n", dname);
+ 
+-	if (chdir(dirname) != -1) {
++	if (chdir(dname) != -1) {
+ 		if ((dir1 = opendir("."))) {
+ 			while ((dp1 = readdir(dir1))) {
+ 				if (dp1->d_name[0] != '.') {
+@@ -192,139 +192,169 @@
+ }
+ 
+ void 
+-incomplete_cleanup(char *path, int setfree, char *startupdir)
++incomplete_cleanup(char *path, int setfree)
+ {
+ 	DIR		*dir;
+ 	struct dirent	*dp;
++	struct stat	fileinfo;
+ 	
+-	int		i, fd;
+-	regex_t		preg[4];
++	int		i, fd, size;
++	regex_t		preg[8];
+ 	regmatch_t	pmatch[1];
+-	char		temp[PATH_MAX];
++	char		incarr[8][PATH_MAX];
+ 	char		*locator;
+-#if (userellink)
+-	(void)startupdir; // To choke a warning ;-)
+-#endif
++	static char	tempa[PATH_MAX],
++			tempb[PATH_MAX];
++        char            fulldir[PATH_MAX];
+ 
+-	snprintf(temp, PATH_MAX, "%s", incomplete_cd_indicator);
+-	locator = replace_cookies(temp);
+-	if (regcomp_error(regcomp(&preg[0], locator, REG_NEWLINE | REG_EXTENDED), &preg[0], locator))
+-            return;
++	printf("[%s]\n", path);
++
++	if (chdir(path) != -1) {
++		if ((dir = opendir("."))) {
++			while ((dp = readdir(dir))) {
++				snprintf(tempa, PATH_MAX, "%s/%s", path, dp->d_name);
++				if (lstat(tempa, &fileinfo) != -1 && S_ISLNK(fileinfo.st_mode)) {
+ #if (debug_mode && debug_announce)
+-	printf("DEBUG: locator for preg[0]='%s'\n", locator);
++					printf("DEBUG: dp->d_name='%s'\n", dp->d_name);
+ #endif
+-
+-	snprintf(temp, PATH_MAX, "%s", incomplete_indicator);
+-	locator = replace_cookies(temp);
+-        if (regcomp_error(regcomp(&preg[1], locator, REG_NEWLINE | REG_EXTENDED), &preg[1], locator))
+-        {
+-            regfree(&preg[0]);
+-            return;
+-        }
++					if ((fd = open(dp->d_name, O_NDELAY)) != -1) {
++						close(fd);
++	       					if ((size = readlink(tempa, tempb, PATH_MAX)) < 0) continue;
++					        tempb[size] = '\0';
++						if (chdir(tempb) == -1)
++							fprintf(stderr, "chdir(%s): %s\n", tempb, strerror(errno));
++						if (getcwd(fulldir, PATH_MAX) == NULL)
++							fprintf(stderr, "getcwd(%s): %s\n", fulldir, strerror(errno));
++						if (chdir(path) == -1)
++							fprintf(stderr, "chdir(%s): %s\n", path, strerror(errno));
++						if (matchpath(incomplete_generic1_path, fulldir)) {
++							snprintf(incarr[0], PATH_MAX, "%s", incomplete_generic1_cd_indicator);
++							snprintf(incarr[1], PATH_MAX, "%s", incomplete_generic1_indicator);
++							snprintf(incarr[2], PATH_MAX, "%s", incomplete_generic1_base_nfo_indicator);
++							snprintf(incarr[3], PATH_MAX, "%s", incomplete_generic1_nfo_indicator);
++							snprintf(incarr[4], PATH_MAX, "%s", incomplete_generic1_base_sfv_indicator);
++							snprintf(incarr[5], PATH_MAX, "%s", incomplete_generic1_sfv_indicator);
++							snprintf(incarr[6], PATH_MAX, "%s", incomplete_generic1_base_sample_indicator);
++							snprintf(incarr[7], PATH_MAX, "%s", incomplete_generic1_sample_indicator);
+ #if (debug_mode && debug_announce)
+-	printf("DEBUG: locator for preg[1]='%s'\n", locator);
++							printf("DEBUG: Matchpath hit for generic1: '%s'\n", incarr[1]);
+ #endif
+-
+-	snprintf(temp, PATH_MAX, "%s", incomplete_base_nfo_indicator);
+-	locator = replace_cookies(temp);
+-        if (regcomp_error(regcomp(&preg[2], locator, REG_NEWLINE | REG_EXTENDED), &preg[2], locator))
+-        {
+-            regfree(&preg[0]);
+-            regfree(&preg[1]);
+-            return;
+-        }
++						} else if (matchpath(incomplete_generic2_path, fulldir)) {
++							snprintf(incarr[0], PATH_MAX, "%s", incomplete_generic2_cd_indicator);
++							snprintf(incarr[1], PATH_MAX, "%s", incomplete_generic2_indicator);
++							snprintf(incarr[2], PATH_MAX, "%s", incomplete_generic2_base_nfo_indicator);
++							snprintf(incarr[3], PATH_MAX, "%s", incomplete_generic2_nfo_indicator);
++							snprintf(incarr[4], PATH_MAX, "%s", incomplete_generic2_base_sfv_indicator);
++							snprintf(incarr[5], PATH_MAX, "%s", incomplete_generic2_sfv_indicator);
++							snprintf(incarr[6], PATH_MAX, "%s", incomplete_generic2_base_sample_indicator);
++							snprintf(incarr[7], PATH_MAX, "%s", incomplete_generic2_sample_indicator);
+ #if (debug_mode && debug_announce)
+-	printf("DEBUG: locator for preg[2]='%s'\n", locator);
++							printf("DEBUG: Matchpath hit for generic2: '%s'\n", incarr[1]);
+ #endif
+-
+-	snprintf(temp, PATH_MAX, "%s", incomplete_nfo_indicator);
+-	locator = replace_cookies(temp);
+-        if (regcomp_error(regcomp(&preg[3], locator, REG_NEWLINE | REG_EXTENDED), &preg[3], locator))
+-        {
+-            regfree(&preg[0]);
+-            regfree(&preg[1]);
+-            regfree(&preg[2]);
+-            return;
+-        }
++						} else {
++							snprintf(incarr[0], PATH_MAX, "%s", incomplete_cd_indicator);
++							snprintf(incarr[1], PATH_MAX, "%s", incomplete_indicator);
++							snprintf(incarr[2], PATH_MAX, "%s", incomplete_base_nfo_indicator);
++							snprintf(incarr[3], PATH_MAX, "%s", incomplete_nfo_indicator);
++							snprintf(incarr[4], PATH_MAX, "%s", incomplete_base_sfv_indicator);
++							snprintf(incarr[5], PATH_MAX, "%s", incomplete_sfv_indicator);
++							snprintf(incarr[6], PATH_MAX, "%s", incomplete_base_sample_indicator);
++							snprintf(incarr[7], PATH_MAX, "%s", incomplete_sample_indicator);
+ #if (debug_mode && debug_announce)
+-	printf("DEBUG: locator for preg[3]='%s'\n", locator);
++							printf("DEBUG: No matchpath hit: '%s'\n", incarr[1]);
+ #endif
++						}
+ 
+-	printf("[%s]\n", path);
+-
+-	if (chdir(path) != -1) {
+-
+-		if ((dir = opendir("."))) {
+-		
+-			while ((dp = readdir(dir))) {
++						for (i = 0; i < (int)(sizeof(incarr) / sizeof(incarr[i])); i++) {
++							locator = basename(replace_cookies(incarr[i]));
++							if (locator && !regcomp_error(regcomp(&preg[i], locator, REG_NEWLINE | REG_EXTENDED), &preg[i], locator)) {
+ #if (debug_mode && debug_announce)
+-				printf("DEBUG: dp->d_name='%s'\n", dp->d_name);
++								printf("DEBUG: locator for preg[%i]='%s'\n", i, locator);
+ #endif
+-				for (i = 0; i < 4; i++) {
+-					if (regexec(&preg[i], dp->d_name, 1, pmatch, 0) == 0)
+-						if (!(int)pmatch[0].rm_so && (int)pmatch[0].rm_eo == (int)NAMLEN(dp))
+-#if (userellink)
+-							if (checklink(path, dp->d_name, setfree))
+-#else
+-							if (checklink(startupdir, dp->d_name, setfree))
+-#endif
+-								break;
+-					if ((fd = open(dp->d_name, O_NDELAY, 0777)) != -1)
+-						close(fd);
+-					else if (setfree) {
++								if (regexec(&preg[i], dp->d_name, 1, pmatch, 0) == 0)
++									if (!(int)pmatch[0].rm_so && (int)pmatch[0].rm_eo == (int)NAMLEN(dp))
++										if (checklink(dp->d_name, setfree)) {
++											regfree(&preg[i]);
++											break;
++										}
++								regfree(&preg[i]);
++								continue;
++							}
++							regfree(&preg[i]);
++							return;
++						}
++					} else if (setfree) {
+ 						unlink(dp->d_name);
+ 						printf("Broken symbolic link \"%s\" removed.\n", dp->d_name);
+-						i=5;
+ 					}
+ 				}
+ 			}
+ 			closedir(dir);
+-		
++
+ 		} else {
+ 			fprintf(stderr, "opendir(%s): %s\n", path, strerror(errno));
+ 		}
+-		
++
+ 	} else {
+ 		fprintf(stderr, "chdir(%s): %s\n", path, strerror(errno));
+ 	}
+-	
+-	regfree(&preg[0]);
+-	regfree(&preg[1]);
+-	regfree(&preg[2]);
+-	regfree(&preg[3]);
++
+ }
+ 
+ int 
+-checklink(char *path, char *link_, int setfree)
++checklink(char *link_, int setfree)
+ {
+-	int		size, retval;
++	int		size;
+ 	static char	temp[PATH_MAX];
+-	static char	lnk[PATH_MAX];
+-	struct stat	fileinfo;
++        char            fulldir[PATH_MAX], origdir[PATH_MAX];
+ 
+-	size = readlink(link_, temp, PATH_MAX);
+-#if (userellink)
+-	snprintf(lnk, PATH_MAX, "%s", link_);
+-#else
+-	snprintf(lnk, PATH_MAX, "%s/%s", path, temp);
+-#endif
+-
+-	if (size < 0) return 0;
++	if ((size = readlink(link_, temp, PATH_MAX)) < 0) return 0;
+ 	temp[size] = '\0';
+-	retval = 0;
+-	if (stat(lnk, &fileinfo)) {
++	if (getcwd(origdir, PATH_MAX) == NULL)
++		fprintf(stderr, "getcwd(%s): %s\n", origdir, strerror(errno));
++        if ((chdir(temp) == -1) || (getcwd(fulldir, PATH_MAX) == NULL)) {
+ 		if (setfree) {
+ 			unlink(link_);
+-			printf("Broken symbolic link \"%s\" removed.\n", temp);
+-			retval = 1;
++			printf("Broken symbolic link \"%s\" removed.\n", link_);
+ 		}
+ 	} else {
+-		printf("Incomplete release: \"%s%s\".\n", path, temp);
+-		retval = 1;
++		printf("Incomplete release: \"%s\".\n", fulldir);
+ 	}
+-	return retval;
++	if (chdir(origdir) == -1)
++		fprintf(stderr, "chdir(%s): %s\n", origdir, strerror(errno));
++	return 1;
+ }
+ 
++short int
++matchpath(char *instr, char *path)
++{
++        int             pos = 0;
++        if ( (int)strlen(instr) < 2 || (int)strlen(path) < 2 ) {
++#if (debug_mode && debug_announce)
++		printf("DEBUG: matchpath: pathlength(s) too short - returning nomatch (not an error)\n");
++#endif
++                return 0;
++        }
++        do {
++                switch (*instr) {
++                case 0:
++                case ' ':
++			if (!strncmp(instr - pos, path, pos)) {
++				if (*(instr - 1) == '/')
++					return 1;
++				if (*(path + pos) == '/')
++			        	return 1;
++			}
++                        pos = 0;
++                        break;
++                default:
++                        pos++;
++                        break;
++                }
++        } while (*instr++);
++        return 0;
++}
++
+ void 
+ cleanup(char *pathlist, char *pathlist_dated, int setfree, char *startpath)
+ {
+@@ -342,28 +372,28 @@
+ 		}
+ 
+ 	if (((int)strlen(startpath) > 1) && (setfree == 1)) {
+-		/* Scanning current dir only */
++		printf("Scanning current dir only\n");
+ 
+-		incomplete_cleanup(startpath, setfree, startpath);
++		incomplete_cleanup(startpath, setfree);
+ 	} else {
+ 		newentry = pathlist;
+-		while (1) {
+-			for (entry = newentry; *newentry != ' ' && *newentry != 0; newentry++);
++		while (*newentry) {
++			for (entry = newentry; *newentry != ' ' && *newentry; newentry++);
+ 			sprintf(path, "%s%.*s", startpath, (int)(newentry - entry), entry);
+-			incomplete_cleanup(path, setfree, startpath);
++			incomplete_cleanup(path, setfree);
+ 			if (!*newentry)
+ 				break;
+ 			newentry++;
+ 		}
+-		while (day_back <= (days_back_cleanup - 1)) {
++		while (pathlist_dated && day_back <= (days_back_cleanup - 1)) {
+ 			newentry = pathlist_dated;
+ 			t_day = time(NULL) - (60 * 60 * 24 * day_back);	/* 86400 seconds back == * 1 day */
+ 			time_day = localtime_r(&t_day, time_day);
+-			while (1) {
+-				for (entry = newentry; *newentry != ' ' && *newentry != 0; newentry++);
++			while (*newentry) {
++				for (entry = newentry; *newentry != ' ' && *newentry; newentry++);
+ 				sprintf(path, "%s%.*s", startpath, (int)(newentry - entry), entry);
+ 				strftime(data_day, PATH_MAX, path, time_day);
+-				incomplete_cleanup(data_day, setfree, startpath);
++				incomplete_cleanup(data_day, setfree);
+ 				if (!*newentry)
+ 					break;
+ 				newentry++;
+@@ -374,4 +404,3 @@
+ 	if (time_day)
+ 		free(time_day);
+ }
+-
+Index: CHANGELOG
+===================================================================
+--- CHANGELOG	(revision 2569)
++++ CHANGELOG	(working copy)
+@@ -60,6 +60,12 @@
+ 		- Fixed bug #485 - zipscript-c --config prints ((void *)0) instead of DISABLED.
+ 		- Did some fixes in libcopy to overcome symlinks and old broken libs. Hopefully you
+ 		  no longer need to rm -fR all lib* dirs in /glftpd before running libcopy anymore.
++		- Fixed bug #497 - zipscript-c: If chmod_completebar is enabled then
++		  create_missing_sample_link does not work - fix done by lex.
++		- Fixed bug #498, 499, 500 - cleanup.c - various fixes done by Sked.
++		- Rescan did not re-create missing-sfv links (fix by Sked).
++		- Fixed inaccuracy-bug in matchpath().
++		- Added names to some values instf 0,1,2.
+ 
+ 		v1.1.0a --> 1.2.0 :
+ 		- added option to make accept_script run prior to complete_script.
+Index: configGen/config.yaml
+===================================================================
+--- configGen/config.yaml	(revision 2569)
++++ configGen/config.yaml	(working copy)
+@@ -420,33 +420,35 @@
+     status_bar_type:
+         type: integer
+         valid_values: 
+-            - 0
+-            - 1
++            - BAR_FILE
++            - BAR_DIR
++            - BAR_OFF
+         comment: |-
+             In each dir there will be a statusbar. Here you define if you wish
+-            to make it as a file (0) or as a dir (1).
+-        default: 1
++            to make it as a file (BAR_FILE) or as a dir (BAR_DIR). To disable use
++            BAR_OFF.
++        default: BAR_DIR
+ 
+     incompleteislink:
+         type: integer
+         valid_values: 
+-            - 0
+-            - 1
++            - TRUE
++            - FALSE
+         comment: |-
+             While a release is incomplete, a link will be created pointing to
+-            the releasedir. You can define if it will be a file (0) or a
+-            symbolic link (1).
+-        default: 1
++            the releasedir. You can define if it will be a file (FALSE) or
++            a symbolic link (TRUE).
++        default: TRUE
+ 
+     userellink:
+         type: integer
+         valid_values: 
+-            - 0
+-            - 1
++            - FALSE
++            - TRUE
+         comment: |-
+-            With symbolic links you have an option of it being absolute (0) or
+-            relative (1).
+-        default: 1
++            With symbolic links you have an option of it being absolute (FALSE) or
++            relative (TRUE).
++        default: TRUE
+ 
+     program_uid:
+         type: integer
+Index: sitebot/src/passchk.c
+===================================================================
+--- sitebot/src/passchk.c	(revision 2569)
++++ sitebot/src/passchk.c	(working copy)
+@@ -205,7 +205,7 @@
+ struct passwd *
+ get_cuftpd_passwd(FILE * fp)
+ {
+-	char *data, *value, tmp;
++	char *data = 0, *value, tmp;
+ 	int  length = 0, varsize = 0, check = 0;
+ 
+ 	while (fread(&tmp, 1, 1, fp) > 0) {
+Index: README.ZSCONFIG
+===================================================================
+--- README.ZSCONFIG	(revision 2569)
++++ README.ZSCONFIG	(working copy)
+@@ -1077,11 +1077,11 @@
+ 	This variable defines indicators on missing sfv in normal releases.
+ 	Default: "../(no-sfv)-%0"
+ 
+-incompleteislink <0|1>
++incompleteislink <true|false>
+ 	While a release is incomplete, a link will be created pointing to
+-	the releasedir. You can define if it will be a file (0) or a
+-	symbolic link (1).
+-	Default: 1
++	the releasedir. You can define if it will be a file (FALSE) or
++	a symbolic link (TRUE).
++	Default: true
+ 
+ lock_optimize <NUMBER>
+ 	This option is meant to minimize impact the runtime of the locking.
+@@ -1479,10 +1479,11 @@
+ 	can define here the dirs dedicated to speedtesting.
+ 	Default: "/site/speedtest/"
+ 
+-status_bar_type <0|1>
++status_bar_type <BAR_FILE|BAR_DIR|BAR_OFF>
+ 	In each dir there will be a statusbar. Here you define if you wish
+-	to make it as a file (0) or as a dir (1).
+-	Default: 1
++	to make it as a file (BAR_FILE) or as a dir (BAR_DIR). To disable use
++	BAR_OFF.
++	Default: BAR_DIR
+ 
+ storage <PATH>
+ 	This is the place where the zipscript keeps a 'mirror' of your site's
+@@ -1540,10 +1541,10 @@
+ 	number of possible wrong hits.
+ 	Default: FALSE
+ 
+-userellink <0|1>
+-	With symbolic links you have an option of it being absolute (0) or
+-	relative (1).
+-	Default: 1
++userellink <false|true>
++	With symbolic links you have an option of it being absolute (FALSE) or
++	relative (TRUE).
++	Default: true
+ 
+ video_completebar <STRING|DISABLED>
+ 	When a release is complete, a 'complete bar' will be created. Define

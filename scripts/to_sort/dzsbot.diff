@@ -1,0 +1,39 @@
+--- ng-current/sitebot/dZSbot.tcl    2007-12-22 03:38:42.000000000 +0100
++++ pzs-ng/dZSbot.tcl  2008-01-07 17:09:14.000000000 +0100
+
+ -1040,19 +1050,15 @@
+
+                if {[istrue $bnc(PING)]} {
+                        if {[catch {exec $binary(PING) -c 1 -t $bnc(TIMEOUT) $ip} reply]} {
+-                               set output "$theme(PREFIX)$announce(BNC_PING)"
+-                               set output [replacevar $output "%num" $num]
+-                               set output [replacevar $output "%desc" $desc]
+-                               set output [replacevar $output "%ip" $ip]
+-                               set output [replacevar $output "%port" $port]
+-                               sndone $nick [replacebasic $output "BNC"]
+-                               continue
+-                       }
+-                       set reply [lindex [split $reply "\n"] 1]
+-                       if {[regexp {.+time=(\S+) ms} $reply reply ping]} {
+-                               set ping [format "%.1fms" $ping]
++                               set ping "N/A"
+                        } else {
+-                               putlog "dZSbot error: Unable to parse ping reply \"$reply\", please report to pzs-ng developers."
++                               set reply [lindex [split $reply "\n"] 1]
++                               if {[regexp {.+time=(\S+) ms} $reply reply ping]} {
++                                       set ping [format "%.1f" $ping]
++                                       append ping "ms"
++                               } else {
++                                       putlog "dZSbot error: Unable to parse ping reply \"$reply\", please report to pzs-ng developers."
++                               }
+                        }
+                }
+
+ -1063,6 +1069,7 @@
+                        set status [catch {exec $binary(CURL) --connect-timeout $bnc(TIMEOUT) -u $bnc(USER):$bnc(PASS) ftp://$ip:$port 2>@stdout} reply]
+                }
+                set response [expr {[clock clicks -milliseconds] - $response}]
++               append response "ms"
+
+                if {!$status} {
+                        set output "$theme(PREFIX)$announce(BNC_ONLINE)"
